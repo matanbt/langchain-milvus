@@ -36,6 +36,7 @@ from pymilvus import (
 )
 from pymilvus.client.types import LoadState  # type: ignore
 from pymilvus.orm.types import infer_dtype_bydata  # type: ignore
+import pymilvus.orm.constants as milvus_constants
 
 from langchain_milvus.function import BaseMilvusBuiltInFunction, BM25BuiltInFunction
 from langchain_milvus.utils.constant import PRIMARY_FIELD, TEXT_FIELD, VECTOR_FIELD
@@ -2282,7 +2283,7 @@ class Milvus(VectorStore):
             expr (str): A filtering expression (e.g., `"city == 'Seoul'"`).
             fields (Optional[List[str]]): List of fields to retrieve.
                                           If None, retrieves all available fields.
-            limit (int): Maximum number of results to return.
+            limit (int): Maximum number of results to return. `None` or `-1` means all results.
 
         Returns:
             List[Document]: List of documents matching the metadata filter.
@@ -2292,6 +2293,10 @@ class Milvus(VectorStore):
         if self.col is None:
             logger.debug("No existing collection to search.")
             return []
+        
+        if limit is None or limit == -1:
+            # Use a constant for unlimited results
+            limit = milvus_constants.UNLIMITED
 
         # Default to retrieving all fields if none are provided
         if fields is None:
@@ -2302,12 +2307,23 @@ class Milvus(VectorStore):
             fields.append(self._text_field)
 
         try:
-            results = self.client.query(
+            query_iterator = self.client.query_iterator(
                 self.collection_name,
+                batch_size=1000,
                 filter=expr,
                 output_fields=fields,
                 limit=limit,
             )
+
+            # Iterate on result batches, and aggregate them
+            results = []
+            while True:  
+                curr_results = query_iterator.next()
+                if len(curr_results) == 0:  # exhausted all results
+                    query_iterator.close()
+                    break
+                results.extend(curr_results)
+
             return [
                 Document(page_content=result[self._text_field], metadata=result)
                 for result in results
