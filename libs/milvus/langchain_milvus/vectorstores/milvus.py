@@ -810,10 +810,10 @@ class Milvus(VectorStore):
                             )
                         )
                     else:
-                        element_type = None
+                        kwargs = dict()
                         if isinstance(value, list):  # HACK to not infer array type
                             dtype = DataType.ARRAY
-                            element_type = DataType.VARCHAR  # HACK assume this is a string list
+                            kwargs.update(element_type=DataType.VARCHAR, max_length=128)  # HACK assume this is a string list
                         else:
                             dtype = infer_dtype_bydata(value)
                         # Datatype isn't compatible
@@ -849,7 +849,7 @@ class Milvus(VectorStore):
                         # https://github.com/milvus-io/pymilvus/issues/2165
                         elif dtype == DataType.ARRAY:
                             fields.append(
-                                FieldSchema(name=key, dtype=DataType.ARRAY, element_type=element_type)
+                                FieldSchema(name=key, dtype=DataType.ARRAY, **kwargs)
                             )
                         else:
                             fields.append(FieldSchema(key, dtype))
