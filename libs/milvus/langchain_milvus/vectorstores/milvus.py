@@ -810,7 +810,12 @@ class Milvus(VectorStore):
                             )
                         )
                     else:
-                        dtype = infer_dtype_bydata(value)
+                        element_type = None
+                        if isinstance(value, list):  # HACK to not infer array type
+                            dtype = DataType.ARRAY
+                            element_type = DataType.VARCHAR  # HACK assume this is a string list
+                        else:
+                            dtype = infer_dtype_bydata(value)
                         # Datatype isn't compatible
                         if dtype == DataType.UNKNOWN or dtype == DataType.NONE:
                             logger.error(
@@ -843,9 +848,8 @@ class Milvus(VectorStore):
                         # infer_dtype_bydata can recognize array type.
                         # https://github.com/milvus-io/pymilvus/issues/2165
                         elif dtype == DataType.ARRAY:
-                            kwargs = self.metadata_schema[key]["kwargs"]  # type: ignore
                             fields.append(
-                                FieldSchema(name=key, dtype=DataType.ARRAY, **kwargs)
+                                FieldSchema(name=key, dtype=DataType.ARRAY, element_type=element_type)
                             )
                         else:
                             fields.append(FieldSchema(key, dtype))
