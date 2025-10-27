@@ -812,11 +812,11 @@ class Milvus(VectorStore):
                     else:
                         kwargs = dict()
                         if isinstance(value, list):  # HACK to not infer array type
-                            dtype = DataType.ARRAY
+                            dtype = DataType.JSON
                             kwargs.update(
-                                element_type=DataType.VARCHAR,  # specify what's in the array; HACK assume this is a string list
-                                max_length=128, # max number of elements in the array
-                                max_capacity=1024, # max total length of all strings
+                                # element_type=DataType.VARCHAR,  # specify what's in the array; HACK assume this is a string list
+                                # max_length=128, # max number of elements in the array
+                                # max_capacity=1024, # max total length of all strings
                             )  
                         else:
                             dtype = infer_dtype_bydata(value)
