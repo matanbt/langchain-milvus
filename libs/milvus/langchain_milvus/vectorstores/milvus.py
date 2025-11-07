@@ -1397,42 +1397,107 @@ class Milvus(VectorStore):
                 )
         return pks
 
+    # def _handle_batch_operation_exception(
+    #     self,
+    #     e: MilvusException,
+    #     batch_list: list[dict],
+    #     batch_index: int,
+    #     total_count: int,
+    #     operation_name: str,
+    # ) -> None:
+    #     """Handle batch operation exceptions with detailed logging.
+
+    #     Args:
+    #         e: The MilvusException that occurred
+    #         batch_list: The batch list that caused the exception
+    #         batch_index: Current batch index (0-based)
+    #         total_count: Total number of entities
+    #         operation_name: Name of the operation (e.g., "insert", "upsert")
+
+    #     Raises:
+    #         MilvusException: Re-raises the original exception after logging
+    #     """
+    #     first_entity = {}
+    #     if batch_list:
+    #         first_entity = batch_list[0]
+    #     log_entity = {}
+    #     for k, v in first_entity.items():
+    #         if isinstance(v, list) and len(v) > 10:
+    #             log_entity[k] = f"{v[:10]}... (truncated, total len: {len(v)})"
+    #         else:
+    #             log_entity[k] = v
+        
+    #     logger.error(
+    #         "Failed to %s batch starting at entity: %s/%s. " "First entity data: %s",
+    #         operation_name,
+    #         batch_index + 1,
+    #         total_count,
+    #         log_entity,
+    #     )
+    #     raise e
+
+    # THE FOLLOWING IS HACK FOR VERBOSE LOGGING AND DEBUGGING! PLEASE REMOVE ME WHEN YOU'RE DONE :(
     def _handle_batch_operation_exception(
         self,
         e: MilvusException,
         batch_list: list[dict],
-        batch_index: int,
+        batch_index: int, # This is the index of the *first entity* in the batch
         total_count: int,
         operation_name: str,
     ) -> None:
-        """Handle batch operation exceptions with detailed logging.
+        """Handle batch operation exceptions with detailed logging."""
 
-        Args:
-            e: The MilvusException that occurred
-            batch_list: The batch list that caused the exception
-            batch_index: Current batch index (0-based)
-            total_count: Total number of entities
-            operation_name: Name of the operation (e.g., "insert", "upsert")
+        batch_size = len(batch_list)
+        first_entity_data = batch_list[0] if batch_list else {}
+        
+        # --- New: Try to find the *specific* problematic entity ---
+        problematic_entity_data = None
+        problematic_row_index = None
+        
+        # Try to parse the row number from the Milvus error
+        if e.message:
+            match = re.search(r"row number: (\d+)", str(e.message))
+            if match:
+                try:
+                    # `row number` is the index *within the batch*
+                    problematic_row_index = int(match.group(1))
+                    if 0 <= problematic_row_index < batch_size:
+                        problematic_entity_data = batch_list[problematic_row_index]
+                except (ValueError, IndexError):
+                    problematic_entity_data = None # Failed to parse or index
 
-        Raises:
-            MilvusException: Re-raises the original exception after logging
-        """
-        first_entity = {}
-        if batch_list:
-            first_entity = batch_list[0]
-        log_entity = {}
-        for k, v in first_entity.items():
-            if isinstance(v, list) and len(v) > 10:
-                log_entity[k] = f"{v[:10]}... (truncated, total len: {len(v)})"
-            else:
-                log_entity[k] = v
-        logger.error(
-            "Failed to %s batch starting at entity: %s/%s. " "First entity data: %s",
-            operation_name,
-            batch_index + 1,
-            total_count,
-            log_entity,
+        # --- Construct the detailed log message ---
+        
+        # 1. Base error message
+        error_msg = (
+            f"Failed to {operation_name} batch. "
+            f"Error: <{e.__class__.__name__}: (code={e.code}, message={e.message})>. "
         )
+        
+        # 2. Add batch context
+        entity_range = f"{batch_index} to {batch_index + batch_size - 1}"
+        error_msg += (
+            f"Batch context: {operation_name} failed for batch of {batch_size} entities "
+            f"(indices {entity_range} out of {total_count}). "
+        )
+        
+        # 3. Add specific entity info, if found
+        if problematic_entity_data:
+            # Use the _truncate_entity helper, or the original logic
+            log_problem_entity = _truncate_entity(problematic_entity_data)
+            error_msg += (
+                f"Milvus identified problematic entity at batch row index: {problematic_row_index}. "
+                f"Problematic entity data: {log_problem_entity}"
+            )
+        else:
+            # Fallback to original behavior: log the first entity
+            log_first_entity = _truncate_entity(first_entity_data)
+            error_msg += (
+                f"Milvus error did not specify a row number or it was unparseable. "
+                f"Logging first entity of the batch (index {batch_index}) for context: {log_first_entity}"
+            )
+
+        logger.error(error_msg)
         raise e
 
     def _collection_search(
