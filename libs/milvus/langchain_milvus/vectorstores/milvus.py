@@ -36,6 +36,7 @@ from pymilvus import (
 )
 from pymilvus.client.types import LoadState  # type: ignore
 from pymilvus.orm.types import infer_dtype_bydata  # type: ignore
+import pymilvus.orm.constants as milvus_constants
 
 from langchain_milvus.function import BaseMilvusBuiltInFunction, BM25BuiltInFunction
 from langchain_milvus.utils.constant import PRIMARY_FIELD, TEXT_FIELD, VECTOR_FIELD
@@ -412,8 +413,7 @@ class Milvus(VectorStore):
                 self.col.set_properties(self.collection_properties)
         # If need to drop old, drop it
         if drop_old and isinstance(self.col, Collection):
-            self.col.drop()
-            self.col = None
+            self.drop()
 
         # Initialize the vector store
         self._init(
@@ -810,7 +810,16 @@ class Milvus(VectorStore):
                             )
                         )
                     else:
-                        dtype = infer_dtype_bydata(value)
+                        kwargs = dict()
+                        if isinstance(value, list):  # HACK to not infer array type
+                            dtype = DataType.JSON
+                            kwargs.update(
+                                # element_type=DataType.VARCHAR,  # specify what's in the array; HACK assume this is a string list
+                                # max_length=128, # max number of elements in the array
+                                # max_capacity=1024, # max total length of all strings
+                            )  
+                        else:
+                            dtype = infer_dtype_bydata(value)
                         # Datatype isn't compatible
                         if dtype == DataType.UNKNOWN or dtype == DataType.NONE:
                             logger.error(
@@ -843,7 +852,6 @@ class Milvus(VectorStore):
                         # infer_dtype_bydata can recognize array type.
                         # https://github.com/milvus-io/pymilvus/issues/2165
                         elif dtype == DataType.ARRAY:
-                            kwargs = self.metadata_schema[key]["kwargs"]  # type: ignore
                             fields.append(
                                 FieldSchema(name=key, dtype=DataType.ARRAY, **kwargs)
                             )
@@ -1389,42 +1397,107 @@ class Milvus(VectorStore):
                 )
         return pks
 
+    # def _handle_batch_operation_exception(
+    #     self,
+    #     e: MilvusException,
+    #     batch_list: list[dict],
+    #     batch_index: int,
+    #     total_count: int,
+    #     operation_name: str,
+    # ) -> None:
+    #     """Handle batch operation exceptions with detailed logging.
+
+    #     Args:
+    #         e: The MilvusException that occurred
+    #         batch_list: The batch list that caused the exception
+    #         batch_index: Current batch index (0-based)
+    #         total_count: Total number of entities
+    #         operation_name: Name of the operation (e.g., "insert", "upsert")
+
+    #     Raises:
+    #         MilvusException: Re-raises the original exception after logging
+    #     """
+    #     first_entity = {}
+    #     if batch_list:
+    #         first_entity = batch_list[0]
+    #     log_entity = {}
+    #     for k, v in first_entity.items():
+    #         if isinstance(v, list) and len(v) > 10:
+    #             log_entity[k] = f"{v[:10]}... (truncated, total len: {len(v)})"
+    #         else:
+    #             log_entity[k] = v
+        
+    #     logger.error(
+    #         "Failed to %s batch starting at entity: %s/%s. " "First entity data: %s",
+    #         operation_name,
+    #         batch_index + 1,
+    #         total_count,
+    #         log_entity,
+    #     )
+    #     raise e
+
+    # THE FOLLOWING IS HACK FOR VERBOSE LOGGING AND DEBUGGING! PLEASE REMOVE ME WHEN YOU'RE DONE :(
     def _handle_batch_operation_exception(
         self,
         e: MilvusException,
         batch_list: list[dict],
-        batch_index: int,
+        batch_index: int, # This is the index of the *first entity* in the batch
         total_count: int,
         operation_name: str,
     ) -> None:
-        """Handle batch operation exceptions with detailed logging.
+        """Handle batch operation exceptions with detailed logging."""
 
-        Args:
-            e: The MilvusException that occurred
-            batch_list: The batch list that caused the exception
-            batch_index: Current batch index (0-based)
-            total_count: Total number of entities
-            operation_name: Name of the operation (e.g., "insert", "upsert")
+        batch_size = len(batch_list)
+        first_entity_data = batch_list[0] if batch_list else {}
+        
+        # --- New: Try to find the *specific* problematic entity ---
+        problematic_entity_data = None
+        problematic_row_index = None
+        
+        # Try to parse the row number from the Milvus error
+        if e.message:
+            match = re.search(r"row number: (\d+)", str(e.message))
+            if match:
+                try:
+                    # `row number` is the index *within the batch*
+                    problematic_row_index = int(match.group(1))
+                    if 0 <= problematic_row_index < batch_size:
+                        problematic_entity_data = batch_list[problematic_row_index]
+                except (ValueError, IndexError):
+                    problematic_entity_data = None # Failed to parse or index
 
-        Raises:
-            MilvusException: Re-raises the original exception after logging
-        """
-        first_entity = {}
-        if batch_list:
-            first_entity = batch_list[0]
-        log_entity = {}
-        for k, v in first_entity.items():
-            if isinstance(v, list) and len(v) > 10:
-                log_entity[k] = f"{v[:10]}... (truncated, total len: {len(v)})"
-            else:
-                log_entity[k] = v
-        logger.error(
-            "Failed to %s batch starting at entity: %s/%s. " "First entity data: %s",
-            operation_name,
-            batch_index + 1,
-            total_count,
-            log_entity,
+        # --- Construct the detailed log message ---
+        
+        # 1. Base error message
+        error_msg = (
+            f"Failed to {operation_name} batch. "
+            f"Error: <{e.__class__.__name__}: (code={e.code}, message={e.message})>. "
         )
+        
+        # 2. Add batch context
+        entity_range = f"{batch_index} to {batch_index + batch_size - 1}"
+        error_msg += (
+            f"Batch context: {operation_name} failed for batch of {batch_size} entities "
+            f"(indices {entity_range} out of {total_count}). "
+        )
+        
+        # 3. Add specific entity info, if found
+        if problematic_entity_data:
+            # Use the _truncate_entity helper, or the original logic
+            log_problem_entity = _truncate_entity(problematic_entity_data)
+            error_msg += (
+                f"Milvus identified problematic entity at batch row index: {problematic_row_index}. "
+                f"Problematic entity data: {log_problem_entity}"
+            )
+        else:
+            # Fallback to original behavior: log the first entity
+            log_first_entity = _truncate_entity(first_entity_data)
+            error_msg += (
+                f"Milvus error did not specify a row number or it was unparseable. "
+                f"Logging first entity of the batch (index {batch_index}) for context: {log_first_entity}"
+            )
+
+        logger.error(error_msg)
         raise e
 
     def _collection_search(
@@ -2003,6 +2076,16 @@ class Milvus(VectorStore):
             )
             return False
 
+    def drop(self) -> None:
+        """Delete all the content in the index, by dropping the (only) collection."""
+        if self.col is not None:
+            self.col.drop()
+            self.col = None
+        else:
+            logger.warning(
+                "Collection %s does not exist, nothing to drop.", self.collection_name
+            )
+
     @classmethod
     def from_texts(
         cls,
@@ -2273,7 +2356,7 @@ class Milvus(VectorStore):
             expr (str): A filtering expression (e.g., `"city == 'Seoul'"`).
             fields (Optional[List[str]]): List of fields to retrieve.
                                           If None, retrieves all available fields.
-            limit (int): Maximum number of results to return.
+            limit (int): Maximum number of results to return. `None` or `-1` means all results.
 
         Returns:
             List[Document]: List of documents matching the metadata filter.
@@ -2283,18 +2366,37 @@ class Milvus(VectorStore):
         if self.col is None:
             logger.debug("No existing collection to search.")
             return []
+        
+        if limit is None or limit == -1:
+            # Use a constant for unlimited results
+            limit = milvus_constants.UNLIMITED
 
         # Default to retrieving all fields if none are provided
         if fields is None:
             fields = self.fields
 
+        # Ensure the text field is included in the output fields
+        if self._text_field not in fields:
+            fields.append(self._text_field)
+
         try:
-            results = self.client.query(
+            query_iterator = self.client.query_iterator(
                 self.collection_name,
+                batch_size=1000,
                 filter=expr,
                 output_fields=fields,
                 limit=limit,
             )
+
+            # Iterate on result batches, and aggregate them
+            results = []
+            while True:  
+                curr_results = query_iterator.next()
+                if len(curr_results) == 0:  # exhausted all results
+                    query_iterator.close()
+                    break
+                results.extend(curr_results)
+
             return [
                 Document(page_content=result[self._text_field], metadata=result)
                 for result in results
@@ -3214,6 +3316,10 @@ class Milvus(VectorStore):
         # Default to retrieving all fields if none are provided
         if fields is None:
             fields = self.fields
+
+        # Ensure the text field is included in the output fields
+        if self._text_field not in fields:
+            fields.append(self._text_field)
 
         try:
             results = await self.aclient.query(
